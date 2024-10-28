@@ -1,0 +1,333 @@
+#code for simulation, plot and performance evaluation for the strategy(Simple moving average and stop loss)
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import timedelta
+
+nifty_50_stocks = [
+    'ADANIPORTS.NS', 'ASIANPAINT.NS', 'AXISBANK.NS', 'BAJAJ-AUTO.NS',
+    'BAJAJFINANCE.NS', 'BAJAJFINSV.NS', 'BPCL.NS', 'BHARTIARTL.NS',
+    'BRITANNIA.NS', 'CIPLA.NS', 'COALINDIA.NS',
+    'DRREDDY.NS', 'EICHERMOT.NS', 'GAIL.NS', 'GRASIM.NS',
+    'HCLTECH.NS', 'HDFCBANK.NS', 'HEROMOTOCO.NS', 'HINDALCO.NS',
+    'HINDUNILVR.NS', 'ITC.NS', 'ICICIBANK.NS',
+    'IOC.NS', 'INDUSINDBK.NS', 'INFY.NS',
+    'JSWSTEEL.NS', 'KOTAKBANK.NS', 'LT.NS', 'M&M.NS',
+    'MARUTI.NS', 'NTPC.NS', 'NESTLEIND.NS', 'ONGC.NS',
+    'POWERGRID.NS', 'RELIANCE.NS', 'SBIN.NS', 'SUNPHARMA.NS',
+    'TCS.NS', 'TATAMOTORS.NS', 'TATASTEEL.NS', 'TECHM.NS',
+    'TITAN.NS', 'UPL.NS', 'ULTRACEMCO.NS', 'VEDL.NS',
+    'WIPRO.NS', 'YESBANK.NS'
+]
+
+short_window = 50
+long_window = 200
+start_date = '2000-01-01'
+end_date = '2024-01-01'
+
+risk_free_rate = 0.07
+stop_loss_percentage = 0.08
+
+trade_order_book = []
+
+def generate_signals_with_sma(stock_data):
+    stock_data['SMA50'] = stock_data['Close'].rolling(window=short_window, min_periods=1).mean()
+    stock_data['SMA200'] = stock_data['Close'].rolling(window=long_window, min_periods=1).mean()
+
+    stock_data['in_trade'] = 0
+    stock_data['Signal'] = np.where((stock_data['in_trade'] == 0) & (stock_data['SMA50'] > stock_data['SMA200']), 1, 0)
+    stock_data['Signal'] = np.where((stock_data['in_trade'] == 1) & (stock_data['SMA50'] < stock_data['SMA200']), -1, stock_data['Signal'])
+    stock_data['Position'] = stock_data['Signal'].diff()
+    stock_data['in_trade'] = np.where(stock_data['Position'] == 1, 1,
+                                       np.where(stock_data['Position'] == -1, 0, stock_data['in_trade']))
+
+    stock_data['Returns'] = stock_data['Close'].pct_change()
+    return stock_data
+
+
+for stock_symbol in nifty_50_stocks:
+    print(f"Processing {stock_symbol}")
+    stock_data = yf.download(stock_symbol, start=start_date, end=end_date)
+    stock_data = generate_signals_with_sma(stock_data)
+
+    for i in range(len(stock_data)):
+        if stock_data['Position'].iloc[i] == 1:
+            buy_price = stock_data['Close'].iloc[i]
+            buy_date = stock_data.index[i]
+            quantity = 1
+            trade_order_book.append([stock_symbol, buy_price, None, buy_date, None, None, quantity])
+        elif stock_data['Position'].iloc[i] == -1:
+            for trade in reversed(trade_order_book):
+                if trade[0] == stock_symbol and trade[2] is None:
+                    sell_price = stock_data['Close'].iloc[i]
+                    sell_date = stock_data.index[i]
+                    profit_loss = sell_price - trade[1]
+                    trade[2] = sell_price
+                    trade[4] = sell_date
+                    trade[5] = profit_loss
+                    break
+
+final_date = pd.to_datetime("2024-01-01")
+for trade in trade_order_book:
+    if trade[2] is None:
+        final_price = yf.download(trade[0], start=final_date, end=final_date + timedelta(days=1))['Close'].values[0]
+        trade[2] = final_price
+        trade[4] = final_date
+        trade[5] = final_price - trade[1]
+
+trade_order_df = pd.DataFrame(trade_order_book, columns=['Ticker', 'Buy Price', 'Sell Price', 'Buy Date', 'Sell Date', 'Profit/Loss', 'Quantity'])
+trade_order_df['Stop Loss'] = trade_order_df['Buy Price'] * (1 - stop_loss_percentage)
+trade_order_df['Total Profit/Loss'] = trade_order_df['Profit/Loss'] * trade_order_df['Quantity']
+
+
+if not trade_order_df.empty:
+    trade_order_df['Returns'] = trade_order_df['Profit/Loss'] / trade_order_df['Buy Price']
+    total_return = trade_order_df['Profit/Loss'].sum()
+    portfolio_returns = (1 + trade_order_df['Returns']).cumprod()
+
+    years = (trade_order_df['Sell Date'].max() - trade_order_df['Buy Date'].min()).days / 365
+    cagr = (portfolio_returns.iloc[-1]) ** (1 / years) - 1
+    std_dev = trade_order_df['Profit/Loss'].std() * np.sqrt(252)
+    sharpe_ratio = (portfolio_returns.mean() * 252 - risk_free_rate) / std_dev if std_dev != 0 else np.nan
+    roll_max = portfolio_returns.cummax()
+    drawdown = portfolio_returns / roll_max - 1
+    max_drawdown = drawdown.min()
+
+    negative_returns = trade_order_df['Returns'][trade_order_df['Returns'] < 0]
+    downside_deviation = np.std(negative_returns) * np.sqrt(252)
+    sortino_ratio = (portfolio_returns.mean() * 252 - risk_free_rate) / downside_deviation if downside_deviation != 0 else np.nan
+
+    print(f'Total Portfolio Return: {total_return}')
+    print(f'CAGR: {cagr}')
+    print(f'Standard Deviation: {std_dev}')
+    print(f'Sharpe Ratio: {sharpe_ratio}')
+    print(f'Maximum Drawdown: {max_drawdown}')
+    print(f'Sortino Ratio: {sortino_ratio}')
+
+    num_simulations = 1000
+    num_days = 252
+    simulation_results = np.zeros((num_simulations, num_days))
+
+    mean_return = trade_order_df['Returns'].mean()
+    std_return = trade_order_df['Returns'].std()
+
+    for i in range(num_simulations):
+        daily_returns = np.random.normal(mean_return, std_return, num_days)
+        cumulative_returns = np.cumprod(1 + daily_returns)
+        simulation_results[i] = cumulative_returns
+
+    plt.figure(figsize=(14, 7))
+    plt.plot(simulation_results.T, color='blue', alpha=0.1)
+    plt.title('Monte Carlo Simulation of Portfolio Returns')
+    plt.xlabel('Days')
+    plt.ylabel('Cumulative Returns')
+    plt.grid()
+    plt.show()
+
+    plt.figure(figsize=(14, 7))
+    plt.plot(portfolio_returns, color='green', label='Actual Portfolio Returns')
+    plt.title('Actual Portfolio Returns Over Time')
+    plt.xlabel('Date')
+    plt.ylabel('Cumulative Returns')
+    plt.grid()
+    plt.legend()
+    plt.show()
+
+else:
+    print("No trades were executed. Portfolio metrics cannot be calculated.")
+
+
+#code for checking the trades executed by the strategy in table/excel format
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import timedelta
+from google.colab import files
+
+nifty_50_stocks = [
+    'ADANIPORTS.NS', 'ASIANPAINT.NS', 'AXISBANK.NS', 'BAJAJ-AUTO.NS',
+    'BAJAJFINANCE.NS', 'BAJAJFINSV.NS', 'BPCL.NS', 'BHARTIARTL.NS',
+    'BRITANNIA.NS', 'CIPLA.NS', 'COALINDIA.NS',
+    'DRREDDY.NS', 'EICHERMOT.NS', 'GAIL.NS', 'GRASIM.NS',
+    'HCLTECH.NS', 'HDFCBANK.NS', 'HEROMOTOCO.NS', 'HINDALCO.NS',
+    'HINDUNILVR.NS', 'ITC.NS', 'ICICIBANK.NS',
+    'IOC.NS', 'INDUSINDBK.NS', 'INFY.NS',
+    'JSWSTEEL.NS', 'KOTAKBANK.NS', 'LT.NS', 'M&M.NS',
+    'MARUTI.NS', 'NTPC.NS', 'NESTLEIND.NS', 'ONGC.NS',
+    'POWERGRID.NS', 'RELIANCE.NS', 'SBIN.NS', 'SUNPHARMA.NS',
+    'TCS.NS', 'TATAMOTORS.NS', 'TATASTEEL.NS', 'TECHM.NS',
+    'TITAN.NS', 'UPL.NS', 'ULTRACEMCO.NS', 'VEDL.NS',
+    'WIPRO.NS', 'YESBANK.NS'
+]
+
+short_window = 50
+long_window = 200
+start_date = '2000-01-01'
+end_date = '2024-01-01'
+
+risk_free_rate = 0.07
+stop_loss_percentage = 0.08
+
+trade_order_book = []
+
+def generate_signals_with_sma(stock_data):
+    stock_data['SMA50'] = stock_data['Close'].rolling(window=short_window, min_periods=1).mean()
+    stock_data['SMA200'] = stock_data['Close'].rolling(window=long_window, min_periods=1).mean()
+
+    stock_data['in_trade'] = 0
+
+    stock_data['Signal'] = np.where((stock_data['in_trade'] == 0) & (stock_data['SMA50'] > stock_data['SMA200']), 1, 0)
+
+    stock_data['Signal'] = np.where((stock_data['in_trade'] == 1) & (stock_data['SMA50'] < stock_data['SMA200']), -1, stock_data['Signal'])
+
+    stock_data['Position'] = stock_data['Signal'].diff()
+
+    stock_data['in_trade'] = np.where(stock_data['Position'] == 1, 1,
+                                       np.where(stock_data['Position'] == -1, 0, stock_data['in_trade']))
+
+    stock_data['Returns'] = stock_data['Close'].pct_change()
+
+    return stock_data
+
+for stock_symbol in nifty_50_stocks:
+    print(f"Processing {stock_symbol}")
+    stock_data = yf.download(stock_symbol, start=start_date, end=end_date)
+    stock_data = generate_signals_with_sma(stock_data)
+
+    for i in range(len(stock_data)):
+        if stock_data['Position'].iloc[i] == 1:
+            buy_price = stock_data['Close'].iloc[i]
+            buy_date = stock_data.index[i]
+            quantity = 1
+            trade_order_book.append([stock_symbol, buy_price, None, buy_date, None, None, quantity])
+        elif stock_data['Position'].iloc[i] == -1:
+            for trade in reversed(trade_order_book):
+                if trade[0] == stock_symbol and trade[2] is None:
+                    sell_price = stock_data['Close'].iloc[i]
+                    sell_date = stock_data.index[i]
+                    profit_loss = sell_price - trade[1]
+                    trade[2] = sell_price
+                    trade[4] = sell_date
+                    trade[5] = profit_loss
+                    break
+
+final_date = pd.to_datetime("2024-01-01")
+for trade in trade_order_book:
+    if trade[2] is None:
+        final_price = yf.download(trade[0], start=final_date, end=final_date + timedelta(days=1))['Close'].values[0]
+        trade[2] = final_price
+        trade[4] = final_date
+        trade[5] = final_price - trade[1]
+
+trade_order_df = pd.DataFrame(trade_order_book, columns=['Ticker', 'Buy Price', 'Sell Price', 'Buy Date', 'Sell Date', 'Profit/Loss', 'Quantity'])
+
+trade_order_df['Stop Loss'] = trade_order_df['Buy Price'] * (1 - stop_loss_percentage)
+trade_order_df['Total Profit/Loss'] = trade_order_df['Profit/Loss'] * trade_order_df['Quantity']
+
+
+trade_order_df.to_excel('trade_order_book.xlsx', index=False)
+
+files.download('trade_order_book.xlsx')
+
+if not trade_order_df.empty:
+    trade_order_df['Returns'] = trade_order_df['Profit/Loss'] / trade_order_df['Buy Price']
+    total_return = trade_order_df['Profit/Loss'].sum()
+    portfolio_returns = (1 + trade_order_df['Returns']).cumprod()
+
+    years = (trade_order_df['Sell Date'].max() - trade_order_df['Buy Date'].min()).days / 365
+    cagr = (portfolio_returns.iloc[-1]) ** (1 / years) - 1
+    std_dev = trade_order_df['Profit/Loss'].std() * np.sqrt(252)
+    sharpe_ratio = (portfolio_returns.mean() * 252 - risk_free_rate) / std_dev if std_dev != 0 else np.nan
+    roll_max = portfolio_returns.cummax()
+    drawdown = portfolio_returns / roll_max - 1
+    max_drawdown = drawdown.min()
+
+    negative_returns = trade_order_df['Returns'][trade_order_df['Returns'] < 0]
+    downside_deviation = np.std(negative_returns) * np.sqrt(252)
+    sortino_ratio = (portfolio_returns.mean() * 252 - risk_free_rate) / downside_deviation if downside_deviation != 0 else np.nan
+
+    print(f'Total Portfolio Return: {total_return}')
+    print(f'CAGR: {cagr}')
+    print(f'Standard Deviation: {std_dev}')
+    print(f'Sharpe Ratio: {sharpe_ratio}')
+    print(f'Maximum Drawdown: {max_drawdown}')
+    print(f'Sortino Ratio: {sortino_ratio}')
+else:
+    print("No trades were executed. Portfolio metrics cannot be calculated.")
+
+trade_order_df
+
+#Backtesting the trading strategy  
+!pip install backtrader
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import timedelta
+import backtrader as bt
+
+nifty_50_stocks = [
+    'ADANIPORTS.NS', 'ASIANPAINT.NS', 'AXISBANK.NS', 'BAJAJ-AUTO.NS',
+    'BAJAJFINSV.NS', 'BPCL.NS', 'BHARTIARTL.NS',
+    'BRITANNIA.NS', 'CIPLA.NS', 'COALINDIA.NS', 'DRREDDY.NS',
+    'EICHERMOT.NS', 'GAIL.NS', 'GRASIM.NS', 'HCLTECH.NS',
+    'HDFCBANK.NS', 'HEROMOTOCO.NS', 'HINDALCO.NS', 'HINDUNILVR.NS',
+    'ITC.NS', 'ICICIBANK.NS', 'IOC.NS', 'INDUSINDBK.NS',
+    'INFY.NS', 'JSWSTEEL.NS', 'KOTAKBANK.NS', 'LT.NS',
+    'M&M.NS', 'MARUTI.NS', 'NTPC.NS', 'NESTLEIND.NS',
+    'ONGC.NS', 'POWERGRID.NS', 'RELIANCE.NS', 'SBIN.NS',
+    'SUNPHARMA.NS', 'TCS.NS', 'TATAMOTORS.NS', 'TATASTEEL.NS',
+    'TECHM.NS', 'TITAN.NS', 'UPL.NS', 'ULTRACEMCO.NS',
+    'VEDL.NS', 'WIPRO.NS', 'YESBANK.NS'
+]
+
+class SMACross(bt.Strategy):
+    params = (("short_window", 50), ("long_window", 200),)
+
+    def __init__(self):
+        self.sma_short = bt.indicators.SimpleMovingAverage(
+            self.data.close, period=self.params.short_window
+        )
+        self.sma_long = bt.indicators.SimpleMovingAverage(
+            self.data.close, period=self.params.long_window
+        )
+        self.order = None
+
+    def next(self):
+        if self.order:
+            return
+
+        if self.sma_short > self.sma_long and not self.position:
+            self.order = self.buy()
+
+        elif self.sma_short < self.sma_long and self.position:
+            self.order = self.sell()
+
+def run_backtest(stock_symbol):
+    print(f"Running backtest for {stock_symbol}")
+
+    cerebro = bt.Cerebro()
+    cerebro.addstrategy(SMACross)
+
+    stock_data = yf.download(stock_symbol, start='2000-01-01', end='2024-01-01')
+
+    stock_data.index = pd.to_datetime(stock_data.index)
+
+    data = bt.feeds.PandasData(dataname=stock_data)
+
+    cerebro.adddata(data)
+
+    cerebro.broker.setcash(100000)
+    cerebro.run()
+
+    portfolio_value = cerebro.broker.getvalue()
+    print(f"Final Portfolio Value: {portfolio_value}")
+
+    cerebro.plot()
+
+for stock_symbol in nifty_50_stocks:
+    run_backtest(stock_symbol)
+
+
