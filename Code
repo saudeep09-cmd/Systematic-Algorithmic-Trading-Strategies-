@@ -1,4 +1,4 @@
-#code for simulation, plot and performance evaluation for the strategy(Simple moving average and stop loss)
+#code for simulation, plot and performance evaluation for the strategy(Simple moving average)
 import yfinance as yf
 import pandas as pd
 import numpy as np
